@@ -1,0 +1,75 @@
+
+/* This file is part of Expandlib.
+
+  Copyright (C) 2002 Jasper van de Gronde
+
+  This software is provided 'as-is', without any express or implied
+  warranty.  In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not
+     claim that you wrote the original software. If you use this software
+     in a product, an acknowledgment in the product documentation would be
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not be
+     misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source distribution.
+
+  Jasper van de Gronde th.v.d.gronde@hccnet.nl
+
+*/
+
+/** \file expandlib-cmd-upper.h
+	\brief Headerfile for the 'upper' command
+*/
+
+#ifndef EXPANDLIB_CMD_UPPER_H_INCLUDED
+#define EXPANDLIB_CMD_UPPER_H_INCLUDED
+
+#include <locale>
+
+#include "expandlib-cmd.h"
+
+namespace expander { // *** Start of namespace
+
+	/// The class implementing the 'upper' command
+	/** Syntax:<br>
+		\#upper(stringtoup)	Makes a string uppercase
+	*/
+
+	template<
+		// Used for the expandable string (and the expanded string)
+		class StringType = ::std::string
+		>
+	class expcmd_upper : public expandcmd<StringType> {
+	protected:
+		/// Used for the conversion
+		const std::locale loc;
+
+	public:
+		/// The constructor
+		/** This constructor gets a pointer to an expander::expandable object and passes that,
+			along with the name of the command, to the expander::expandcmd constructor.
+		*/
+		expcmd_upper(expandable<StringType> * const eobj) : expandcmd<StringType>(eobj, _T("upper")), loc("") {};
+
+		virtual void operator()(StringType &dest, const FParamVectorType &params, const FVarMapType &vars, ExpandResultsType &results) const
+		{
+			if ( params.size() == 1 ) {
+				const StringType::iterator u=dest.end();
+				expobj->expand(dest, params[0], vars, results);
+
+				std::use_facet< std::ctype<StringType::value_type> >(loc).toupper(u, dest.end());
+			} else {
+				throw expand_error(_T("expcmd_upper"),_T("Parameter error"));
+			}
+		}
+	};
+
+} // *** End of namespace
+
+#endif //EXPANDLIB_CMD_UPPER_H_INCLUDED

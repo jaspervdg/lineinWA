@@ -1,0 +1,229 @@
+//Microsoft Developer Studio generated resource script.
+//
+#include "resource.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "afxres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// English (U.S.) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+#ifdef _WIN32
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+#pragma code_page(1252)
+#endif //_WIN32
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE DISCARDABLE 
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE DISCARDABLE 
+BEGIN
+    "#include ""afxres.h""\r\n"
+    "\0"
+END
+
+3 TEXTINCLUDE DISCARDABLE 
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_CONFIGDLG DIALOG DISCARDABLE  0, 0, 303, 282
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "LineIn plugin configuration"
+FONT 8, "MS Sans Serif"
+BEGIN
+    DEFPUSHBUTTON   "OK",IDOK,7,261,50,14
+    CONTROL         "List1",IDC_DEVLIST,"SysListView32",LVS_REPORT | 
+                    LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | 
+                    WS_TABSTOP,14,177,274,56
+    LTEXT           "For the documentation you can read the LineIn_Readme.txt in the plugins directory or go to my homepage (much better documentation):\n\thttp://home.hccnet.nl/th.v.d.gronde/\nThat's also where you can find the latest updates.",
+                    IDC_STATIC,7,7,289,34
+    LTEXT           "List of standard devices you can use with the dev option:",
+                    IDC_WAVEDEVTEXT,14,168,252,9
+    CONTROL         "List1",IDC_PRESETLIST,"SysListView32",LVS_REPORT | 
+                    LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_SORTASCENDING | 
+                    LVS_EDITLABELS | WS_BORDER | WS_TABSTOP,7,56,289,76
+    LTEXT           "List of presets you can use with the preset option:",
+                    IDC_STATIC,7,46,268,8
+    PUSHBUTTON      "Add preset",IDC_ADDPRESETBUT,7,132,58,14
+    PUSHBUTTON      "Remove preset",IDC_REMOVEPRESETBUT,65,132,58,14
+    CONTROL         "Tab1",IDC_DEVLISTTAB,"SysTabControl32",0x0,7,151,289,90
+    LTEXT           "List of DirectSound devices you can use with the dev option:",
+                    IDC_DXDEVTEXT,14,168,236,9
+    PUSHBUTTON      "Add location Wizard",IDC_ADDLOCWIZARDBUT,217,261,79,14
+    CONTROL         "Use 'hang on stop' workaround",IDC_HANGONSTOPCHECK,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,246,114,10
+    CONTROL         "Reprepare waveheaders all the time",IDC_REPREPARECHECK,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,167,246,129,10
+END
+
+IDD_PRESETDLG DIALOGEX 0, 0, 247, 63
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_TOOLWINDOW
+CAPTION "Preset"
+FONT 8, "MS Sans Serif", 0, 0, 0x1
+BEGIN
+    DEFPUSHBUTTON   "OK",IDOK,7,42,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,190,42,50,14
+    LTEXT           "Preset name:",IDC_STATIC,7,7,42,9
+    LTEXT           "Preset value:",IDC_STATIC,7,22,43,10
+    EDITTEXT        IDC_PRESETNAME,53,7,187,12,ES_AUTOHSCROLL
+    EDITTEXT        IDC_PRESETVAL,53,22,187,12,ES_AUTOHSCROLL
+END
+
+IDD_DXDEVALIASDLG DIALOGEX 0, 0, 247, 63
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_TOOLWINDOW
+CAPTION "DirectSound Device Alias"
+FONT 8, "MS Sans Serif", 0, 0, 0x1
+BEGIN
+    DEFPUSHBUTTON   "OK",IDOK,7,42,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,190,42,50,14
+    LTEXT           "Device Name:",IDC_DEVICEID,7,7,47,9
+    LTEXT           "Device Alias:",-1,7,22,43,10
+    EDITTEXT        IDC_GUID,57,7,183,12,ES_AUTOHSCROLL
+    EDITTEXT        IDC_ALIAS,57,22,183,12,ES_AUTOHSCROLL
+    LTEXT           "Device Name:",IDC_DEVICEGUID,7,7,47,9
+END
+
+DLG_START DIALOG DISCARDABLE  0, 0, 276, 140
+STYLE WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Property Page"
+FONT 8, "MS Sans Serif"
+BEGIN
+    LTEXT           "Hello, this wizard will help you create an url/location for my plugin (bear in mind that this is just to help you get started, it does not support all options).",
+                    IDC_STATIC,1,1,274,17
+    LTEXT           "At the end the url/location will be added to WinAMP's playlist and/or a preset will be made.",
+                    IDC_STATIC,1,18,274,17
+    LTEXT           "First you have to be sure that your volume settings are correct, if you are unsure wether they are or not, you'd better check (doubleclick the little yellow speaker in the system tray/notification area).",
+                    IDC_STATIC,1,41,274,28
+    LTEXT           "The title (for in the playlist):",IDC_STATIC,1,91,84,8
+    EDITTEXT        IDC_ALWTITLE,87,89,188,12,ES_AUTOHSCROLL
+    LTEXT           "The title supports all kinds of ""variables"" that you can use, like %sr for the samplerate, for more info you should have a look at the documentation on my site.",
+                    IDC_STATIC,9,103,264,19
+    CONTROL         "Append the standard format info to the title (samplerate, etc.)",
+                    IDC_ALWSTDFMTCHECK,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,
+                    1,130,205,10
+    LTEXT           "NOTE: If you leave a field blank the plugin will use the default for that setting.",
+                    IDC_STATIC,1,72,243,8
+END
+
+DLG_DEVSANDFMT DIALOG DISCARDABLE  0, 0, 276, 140
+STYLE WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Property Page"
+FONT 8, "MS Sans Serif"
+BEGIN
+    LTEXT           "Samplerate:",IDC_STATIC,0,2,48,8
+    LTEXT           "Bits per sample:",IDC_STATIC,0,30,53,8
+    LTEXT           "Number of channels:",IDC_STATIC,0,16,66,8
+    EDITTEXT        IDC_ALWSRATE,70,0,67,12,ES_AUTOHSCROLL | ES_NUMBER
+    EDITTEXT        IDC_ALWNCH,70,14,67,12,ES_AUTOHSCROLL | ES_NUMBER
+    EDITTEXT        IDC_ALWBPS,70,28,67,12,ES_AUTOHSCROLL | ES_NUMBER
+    COMBOBOX        IDC_ALWDEVCOMBO,49,57,152,60,CBS_DROPDOWNLIST | 
+                    WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Device to use:",IDC_STATIC,0,59,47,8
+    LTEXT           "This combobox only lets you select standard devices, if you want to use DirectSound devices you have to change the url/location manually (on the next page)",
+                    IDC_STATIC,9,72,266,19
+END
+
+DLG_STOP DIALOG DISCARDABLE  0, 0, 276, 140
+STYLE WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Property Page"
+FONT 8, "MS Sans Serif"
+BEGIN
+    LTEXT           "The option list:",IDC_STATIC,0,2,47,8
+    EDITTEXT        IDC_ALWURL,48,0,226,12,ES_AUTOHSCROLL
+    LTEXT           "Here you can edit the option list further, if you edit it here and press back, all changes to the option list will be lost.",
+                    IDC_STATIC,8,14,264,19
+    CONTROL         "Create a preset",IDC_ALWMAKEPRESET,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,0,42,64,10
+    CONTROL         "Add to the playlist",IDC_ALWADDTOPLAYLIST,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,0,72,71,10
+    LTEXT           "The name of the preset:",IDC_ALWPRESETNAMESTATIC,8,54,
+                    76,8
+    EDITTEXT        IDC_ALWPRESETNAME,86,52,130,12,ES_AUTOHSCROLL
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO DISCARDABLE 
+BEGIN
+    IDD_CONFIGDLG, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 296
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 275
+    END
+
+    IDD_PRESETDLG, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 240
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 56
+    END
+
+    IDD_DXDEVALIASDLG, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 240
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 56
+    END
+
+    DLG_START, DIALOG
+    BEGIN
+        LEFTMARGIN, 1
+        RIGHTMARGIN, 275
+        TOPMARGIN, 1
+        BOTTOMMARGIN, 139
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+#endif    // English (U.S.) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
+

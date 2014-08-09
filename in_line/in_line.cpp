@@ -1,0 +1,1423 @@
+/*
+** LineIn plugin
+** Copyright (c) 2000, Jasper van de Gronde
+*/
+
+//#define LOGGING
+
+// Change the following for new versions
+#ifdef LOGGING
+#ifdef NEWEXPAND
+	#define PLUGINNAME "LineIn plugin v1.81 beta (logged) "
+#else
+	#define PLUGINNAME "LineIn plugin v1.81 beta - old expand (logged) "
+#endif
+#else
+#ifdef NEWEXPAND
+	#define PLUGINNAME "LineIn plugin v1.81 beta "
+#else
+	#define PLUGINNAME "LineIn plugin v1.81 beta - old expand "
+#endif
+#endif
+
+// Defines
+const char* LINEINPLUGINKEY = "Software\\Jasper van de Gronde\\LineIn plugin";
+//#define DXDEVALIASKEY "Software\\Jasper van de Gronde\\LineIn plugin\\DxDevAliases"
+//#define WVDEVALIASKEY "Software\\Jasper van de Gronde\\LineIn plugin\\WvDevAliases"
+
+#define WAVE_DEVICE 0
+#define DIRECTX_DEVICE 1
+
+// Macros
+#define FREE(pntr) (free((LPVOID)pntr),pntr=NULL)
+
+// STL (and boost) includes
+#include <string>
+#include <map>
+#include <algorithm>
+#include <boost/lexical_cast.hpp>
+using namespace std;
+
+// Include for expander
+#include "expandlib/expandlib-expandable.h"
+//#include "expandlib/expandlib-vartype-text.h"
+using namespace expander;
+
+// Windows includes
+#include <windows.h>
+#include <commctrl.h>
+#include <dsound.h>
+#include <stdio.h>
+
+// Winamp include
+#include "wa_ipc.h"
+
+// Messages
+//const unsigned long WM_WA_MPEG_EOF = WM_USER+2;
+
+// Functions from the dxdll
+typedef HRESULT (WINAPI * DIRECTSOUNDCAPTURECREATE)(LPGUID lpGUID, LPDIRECTSOUNDCAPTURE *lplpDSC, LPUNKNOWN pUnkOuter);
+typedef HRESULT (WINAPI * DIRECTSOUNDCAPTUREENUMERATE)(LPDSENUMCALLBACK lpDSEnumCallback, LPVOID lpContext);
+DIRECTSOUNDCAPTURECREATE		DxSndCapCreate=NULL;
+DIRECTSOUNDCAPTUREENUMERATE		DxSndCapEnumerate=NULL;
+HMODULE dxsoundlib;
+
+// Sanitycheck for WAVE_MAPPER
+#if WAVE_MAPPER != -1
+#error WAVE_MAPPER is unequal to -1
+#endif
+
+// Data includes
+#include "resource.h"
+#ifdef WINAMP
+#include "in.h"
+#endif // WINAMP
+
+// WinAMP vars
+#ifdef WINAMP
+extern In_Module mod;
+char lastfn[MAX_PATH];
+#endif // WINAMP
+
+// Dll vars
+HINSTANCE hInstance=NULL;
+int Loaded=FALSE;
+
+// Control vars
+int				paused=FALSE;
+int				Playing=FALSE;
+int				Stopping=FALSE;
+HANDLE    hPauseTillStartThread=0;
+HANDLE    hUpdateTitleThread=0;
+bool      killUpdateTitleThread=false;
+
+// Wave vars
+WAVEFORMATEX	waveInFormat;
+HWAVEIN			hwaveIn=NULL;
+WAVEHDR	*		waveHdr=NULL;
+char *			emptybuffer=NULL;
+char **			buffers;
+
+// DirectX vars
+LPDIRECTSOUNDCAPTURE		lpDxSndCap=NULL;
+LPDIRECTSOUNDCAPTUREBUFFER	lpDxSndCapBuf=NULL;
+LPDIRECTSOUNDNOTIFY			lpDxSndCapNotify=NULL;
+DSCBUFFERDESC				bufDesc;
+WAVEFORMATEX				dxwaveFormat;
+HANDLE *					dxevents=NULL;
+DSBPOSITIONNOTIFY *			dxposnot=NULL;
+bool						killdxthread;
+bool						dxsoundsupport=false;
+
+// Current options
+unsigned long	SAMPLERATE;
+unsigned short	NCHANNELS_IN;
+unsigned short	NCHANNELS_OUT;
+unsigned short	BITSPERSAMPLE;
+
+unsigned short	BLOCKALIGN_IN;
+unsigned short	BLOCKALIGN_OUT;
+
+unsigned __int64 SAMPLES_WRITTEN;
+unsigned __int64 SAMPLES_LENGTH;
+long			LENGTH;
+SYSTEMTIME		STARTTIME;
+bool			ISSTARTTIME;
+bool			ISSTARTDATE;
+
+long			NUMBUFFERS;
+long			BUFSIZE;
+int				BUFFERLEN;
+int				PREBUFFERLEN;
+
+string			CURTITLE;
+string    TITLEFILE;
+bool			SHOWFORMAT;
+
+unsigned long	DEVICE;
+int				DEVTYPE;
+
+bool			MUTE;
+bool			CHECKS;
+
+void*     CHNMAP_BUFFER = 0;
+size_t    CHNMAP_BUFFER_SIZE = 0;
+size_t		CHNMAP[128];
+
+enum trigger_type_t { no_trigger=0, start_trigger, pause_trigger, stop_trigger };
+long			TRIGGERTIME=-1;
+trigger_type_t TRIGGER_TYPE = no_trigger;
+int				STARTTHRESHOLD; // is coupled to a triggertime
+int				PAUSETHRESHOLD; // is coupled to a triggertime
+int				STOPTHRESHOLD; // is coupled to a triggertime
+
+bool			AVOIDSTOPPROBLEM=TRUE;
+
+bool			REPREPARE=FALSE;
+
+
+// Function includes
+#include "../alg/gen.h"
+#include "aliases.h"
+#include "preset.h" // to make the preset option work
+#include "tool.h"
+#include "audiotools.h"
+#include "common.h"
+
+extern const std::wstring msgbox_program_title(L"LineIn plugin v1.80");
+void process_triggers(const char* const data, const int size, const size_t blockalign);
+
+void pause() { paused=1; mod.outMod->Pause(1); }
+void unpause() { paused=0; mod.outMod->Flush(mod.outMod->GetOutputTime()); mod.outMod->Pause(0); }
+int ispaused() { return paused; }
+
+/** \todo Make this use its own counter instead of depending on mod.outMod->GetWrittenTime() */
+bool ProcessBuffer(char* buffer, size_t buffer_size)
+{
+	const trigger_type_t trigger_type = TRIGGER_TYPE;
+
+	if ( !Stopping ) {
+		process_triggers(buffer, buffer_size, BLOCKALIGN_IN);
+		if ( trigger_type != TRIGGER_TYPE ) {
+      switch(TRIGGER_TYPE) {
+      case start_trigger:
+        unpause();
+        break;
+      }
+		}
+	}
+
+	if ( !Stopping && Playing && !paused ) {
+
+    const int written_in_ms = static_cast<int>(static_cast<unsigned __int64>(1000)*SAMPLES_WRITTEN/static_cast<unsigned __int64>(SAMPLERATE));
+
+    if ( CHNMAP[0] != -2 ) {
+      const size_t required_size = NCHANNELS_OUT*(buffer_size/NCHANNELS_IN);
+      if ( required_size > CHNMAP_BUFFER_SIZE ) {
+        CHNMAP_BUFFER = realloc(CHNMAP_BUFFER, required_size);
+        if ( !CHNMAP_BUFFER ) {
+          CHNMAP_BUFFER_SIZE = 0;
+          return false;
+        }
+        CHNMAP_BUFFER_SIZE = required_size;
+      }
+      Remap(CHNMAP_BUFFER, NCHANNELS_OUT, buffer, NCHANNELS_IN, CHNMAP, BITSPERSAMPLE, buffer_size/BLOCKALIGN_IN);
+      buffer = reinterpret_cast<char*>(CHNMAP_BUFFER);
+      buffer_size = required_size;
+    }
+
+		int samples = buffer_size/BLOCKALIGN_OUT;
+    int bytes;
+    if ( mod.dsp_isactive() ) {
+      samples = mod.dsp_dosamples((short*)buffer, samples, BITSPERSAMPLE, NCHANNELS_OUT, SAMPLERATE);
+      bytes = samples*BLOCKALIGN_OUT;
+    }
+    else {
+      bytes = buffer_size;
+    }
+
+		while(mod.outMod->CanWrite() < bytes) Sleep(4);
+
+		mod.SAAddPCMData(buffer, NCHANNELS_OUT, BITSPERSAMPLE, written_in_ms);
+		mod.VSAAddPCMData(buffer, NCHANNELS_OUT, BITSPERSAMPLE, written_in_ms);
+		mod.outMod->Write( ( MUTE ? emptybuffer : buffer ), bytes);
+
+    SAMPLES_WRITTEN += samples;
+
+		if ( LENGTH > -1 ) {
+      if ( SAMPLES_WRITTEN >= SAMPLES_LENGTH ) {
+        Sleep(4);
+				stopme();
+      }
+		}
+	}
+  else {
+    Sleep(4);
+  }
+
+	if ( !Stopping && trigger_type != TRIGGER_TYPE ) {
+    switch(TRIGGER_TYPE) {
+    case pause_trigger:
+      pause();
+      return true;
+      break;
+    case stop_trigger:
+      stopme();
+      return false;
+      break;
+    }
+  }
+
+  return true;
+}
+
+// DirectX thread function to wait for data and forward it
+void DxSndCapThread(void * nothing) {
+	int i;
+	char * buffer;
+	LPVOID data1, data2;
+	DWORD size1, size2;
+#ifdef LOGGING
+	FILE * file;
+#endif
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "DxSndCapThread Start\n");
+	fclose(file);
+#endif
+
+	emptybuffer=(char*)malloc(BUFSIZE*2);
+	memset(emptybuffer, 0, BUFSIZE*2);
+	buffer=(char*)malloc(BUFSIZE*2);
+
+	i=0;
+
+	while(!killdxthread) {
+		i=WaitForMultipleObjects(NUMBUFFERS, dxevents, FALSE, 10) ;
+		if ( i != WAIT_TIMEOUT ) {
+			i-=WAIT_OBJECT_0;
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "Buffer: %i\n", i);
+	fclose(file);
+#endif
+
+			ResetEvent(dxevents[i]);
+
+			lpDxSndCapBuf->Lock(dxposnot[i].dwOffset+1-BUFSIZE, BUFSIZE, &data1, &size1, &data2, &size2, NULL);
+			memcpy(buffer, data1, size1);
+			lpDxSndCapBuf->Unlock(data1, size1, data2, size2);
+
+      if ( !ProcessBuffer(buffer, BUFSIZE) ) break;
+		}
+	}
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "Exiting DxSndCapThread\n");
+	fclose(file);
+#endif
+
+	FREE(buffer);
+	FREE(emptybuffer);
+}
+
+// waveInProc callback function to receive data
+void CALLBACK waveInProc(HWAVEIN hwi, UINT uMsg, DWORD dwInstance, DWORD dwParam1, DWORD dwParam2)
+{
+#ifdef LOGGING
+	FILE * file;
+#endif
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "waveInProc Start - hwi: 0x%08lX  uMsg: 0x%08lX  dwParam1: 0x%08lX\n", (unsigned long)hwi, uMsg, dwParam1);
+	fclose(file);
+#endif
+
+	if( uMsg == WIM_DATA ) {
+		WAVEHDR * wvhdr;
+		MMRESULT result;
+
+		wvhdr=(WAVEHDR*)dwParam1;
+    if ( !ProcessBuffer(wvhdr->lpData, wvhdr->dwBytesRecorded) ) return;
+
+		if ( Playing ) {
+
+			if ( REPREPARE ) {
+#ifdef LOGGING
+			file=fopen("lineinplugin.log", "a+");
+			if ( file == NULL ) return;
+			fprintf(file, "waveInUnprepareHeader (Playing==TRUE)\n");
+			fclose(file);
+#endif
+
+				waveInUnprepareHeader(hwaveIn, wvhdr, sizeof(WAVEHDR));
+
+#ifdef LOGGING
+			file=fopen("lineinplugin.log", "a+");
+			if ( file == NULL ) return;
+			fprintf(file, "waveInPrepareHeader\n");
+			fclose(file);
+#endif
+			
+				if ( !Stopping ) waveInPrepareHeader(hwaveIn, wvhdr, sizeof(WAVEHDR));
+			}// if ( REPREPARE )
+
+#ifdef LOGGING
+			file=fopen("lineinplugin.log", "a+");
+			if ( file == NULL ) return;
+			fprintf(file, "waveInAddBuffer\n");
+			fclose(file);
+#endif
+
+			if( !Stopping && (result=waveInAddBuffer(hwaveIn, wvhdr, sizeof(WAVEHDR)))!=MMSYSERR_NOERROR ) {
+#ifdef LOGGING
+				file=fopen("lineinplugin.log", "a+");
+				if ( file == NULL ) return;
+				fprintf(file, "waveInAddBuffer error: %i\n", (int)result);
+				fclose(file);
+#endif
+
+				ReportError(result, "while re-adding a buffer.");
+				stopme();
+
+#ifdef LOGGING
+				file=fopen("lineinplugin.log", "a+");
+				if ( file == NULL ) return;
+				fprintf(file, "waveInProc End after waveInAddBuffer error\n");
+				fclose(file);
+#endif
+
+				return;
+			}
+		}/* else {
+		}*/
+	}
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "waveInProc End\n");
+	fclose(file);
+#endif
+}
+
+// avoid CRT. Evil. Big. Bloated.
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+{
+	hInstance=hinstDLL;
+	return TRUE;
+}
+
+void about(HWND hwndParent)
+{
+	MessageBox(hwndParent,PLUGINNAME "\n"
+					"Made by Jasper van de Gronde\n"
+					"th.v.d.gronde@hccnet.nl\n"
+					"http://home.hccnet.nl/th.v.d.gronde/\n\n"
+					"Compiled on " __DATE__ "\n","About " PLUGINNAME,MB_OK);
+}
+
+void init() {
+	if ( Loaded ) {
+		Error("Loaded == TRUE");
+		return;
+	}
+
+	Loaded=TRUE;
+
+	// Check for directx module and setup func pointers
+	dxsoundlib=LoadLibrary("dsound.dll");
+	if ( dxsoundlib == NULL ) {
+		dxsoundsupport=false;
+		return;
+	}
+
+	DxSndCapCreate=(DIRECTSOUNDCAPTURECREATE)		GetProcAddress(dxsoundlib, "DirectSoundCaptureCreate");
+	DxSndCapEnumerate=(DIRECTSOUNDCAPTUREENUMERATE)	GetProcAddress(dxsoundlib, "DirectSoundCaptureEnumerateA");
+	if ( DxSndCapCreate == NULL || DxSndCapEnumerate == NULL ) {
+		dxsoundsupport=false;
+		FreeLibrary(dxsoundlib);
+		dxsoundlib=NULL;
+		return;
+	}
+
+	dxsoundsupport=true;
+
+//	CreateConfigDialog();
+}
+
+void quit() {
+	FreeLibrary(dxsoundlib);
+}
+
+int isourfile(char *fn) { return strncmp(fn,"line://",7)?0:1; }
+
+DWORD WINAPI UpdateTitleThread(void * killswitch_p) {
+  bool * killswitch = reinterpret_cast<bool*>(killswitch_p);
+  WIN32_FILE_ATTRIBUTE_DATA attributes;
+  FILETIME lasttime;
+  bool existedlasttime = false;
+  ZeroMemory(&lasttime, sizeof(lasttime));
+  while(!*killswitch) {
+    Sleep(100);
+    ZeroMemory(&attributes, sizeof(attributes));
+    if ( GetFileAttributesEx(TITLEFILE.c_str(), GetFileExInfoStandard, &attributes) ) {
+      if ( !existedlasttime || memcmp(&lasttime, &(attributes.ftLastWriteTime), sizeof(FILETIME)) != 0 ) {
+        SendMessage(mod.hMainWindow, WM_WA_IPC, 0, IPC_UPDTITLE);
+      }
+      existedlasttime = true;
+    }
+    else {
+      if ( existedlasttime ) {
+        SendMessage(mod.hMainWindow, WM_WA_IPC, 0, IPC_UPDTITLE);
+      }
+      ZeroMemory(&lasttime, sizeof(lasttime));
+      existedlasttime = false;
+    }
+  }
+  return 0;
+}
+
+static void PauseTillDate(const SYSTEMTIME& target_date);
+static void PauseTillTomorrow(const SYSTEMTIME& today);
+static void PauseTillTime(const SYSTEMTIME& target_systime);
+
+static void PauseTillDate(const SYSTEMTIME& target_date) {
+  SYSTEMTIME cur_date;
+
+  GetLocalTime(&cur_date);
+  while(compare_sysdate(cur_date, target_date) < 0) {
+    cur_date.wHour = 23;
+    cur_date.wMinute = 59;
+    cur_date.wSecond = 59;
+    cur_date.wMilliseconds = 999;
+    PauseTillTime(cur_date);
+    GetLocalTime(&cur_date);
+  }
+}
+
+static void PauseTillTomorrow(const SYSTEMTIME& today) {
+  SYSTEMTIME org_date = today;
+  SYSTEMTIME cur_date;
+
+  org_date.wHour = 23;
+  org_date.wMinute = 59;
+  org_date.wSecond = 59;
+  org_date.wMilliseconds = 999;
+  PauseTillTime(org_date);
+
+  /* This part is just to make absolutely sure we don't exit the function before the
+     next day has started. */
+  GetLocalTime(&cur_date);
+  while(compare_sysdate(org_date, cur_date) == 0) {
+    Sleep(1);
+    GetLocalTime(&cur_date);
+  }
+}
+
+/** The date portion of target_systime should be set to the "current" date
+    \todo Make this handle an "erratic" clock (suppose we waited until midnight,
+          if the clock would then jump back a few seconds this function would stop
+          immediately). */
+static void PauseTillTime(const SYSTEMTIME& target_systime) {
+  const long target_time = systime_to_ms(target_systime);
+  SYSTEMTIME cur_systimedate;
+  long cur_time;
+
+  GetLocalTime(&cur_systimedate);
+  cur_time = systime_to_ms(cur_systimedate);
+  while(compare_sysdate(cur_systimedate, target_systime) == 0
+     && cur_time < target_time)
+  {
+    Sleep((target_time-cur_time)/2);
+    GetLocalTime(&cur_systimedate);
+    cur_time = systime_to_ms(cur_systimedate);
+  }
+}
+
+static void PauseTillStart(void * nothing) {
+  if ( ISSTARTDATE ) {
+	  PauseTillDate(STARTTIME);
+  }
+  else if ( ISSTARTTIME ) {
+    SYSTEMTIME cur_systime;
+    GetLocalTime(&cur_systime);
+    if ( systime_to_ms(STARTTIME)-systime_to_ms(cur_systime) <= -10*60*1000 ) {
+      /* Starting time more than ten minutes in the past on the same day */
+      PauseTillTomorrow(cur_systime);
+    }
+  }
+
+  if ( ISSTARTTIME ) {
+    SYSTEMTIME cur_systime;
+    GetLocalTime(&cur_systime);
+    if ( ISSTARTDATE
+      || !(systime_to_ms(STARTTIME)-systime_to_ms(cur_systime) > 24*3600*1000-10*60*1000) ) {
+      /* Starting time more than ten minutes in the past on the previous day
+         (or less than 24hours-10minutes in the future) */
+      if ( !ISSTARTDATE ) {
+        STARTTIME.wYear = cur_systime.wYear;
+        STARTTIME.wMonth = cur_systime.wMonth;
+        STARTTIME.wDay = cur_systime.wDay;
+      }
+      PauseTillTime(STARTTIME);      
+    }
+  }
+
+	unpause();
+
+	ExitThread(0);
+}
+
+int play(char *fn) { 
+	MMRESULT result;
+	HRESULT hresult;
+	int maxlatency;
+	long t, par;
+	DWORD tmp;
+	string ttitle;
+	HANDLE dxsndthread;
+	OptionType options;
+	float startthreshold;
+  float pausethreshold;
+	float stopthreshold;
+
+#ifdef LOGGING
+	FILE * file;
+#endif
+
+	strcpy(lastfn,fn);
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return 0;
+	fprintf(file, "\n\nPlay: %s\n", fn);
+	fclose(file);
+#endif
+
+  SAMPLES_WRITTEN = 0;
+  SAMPLES_LENGTH = 0;
+	paused=0;
+	Stopping=FALSE;
+  killUpdateTitleThread=false;
+
+	if (!parseparameters(options, fn/*, 0*/, &SAMPLERATE, &BITSPERSAMPLE, &NCHANNELS_IN, &LENGTH, &STARTTIME, &ISSTARTTIME, &ISSTARTDATE, &NUMBUFFERS, &BUFSIZE, &BUFFERLEN, &PREBUFFERLEN, ttitle, TITLEFILE, &SHOWFORMAT, TRUE, &DEVICE, &MUTE, &CHECKS, &DEVTYPE, CHNMAP, &NCHANNELS_OUT, &TRIGGERTIME, &startthreshold, &stopthreshold, &pausethreshold)) {
+		Error("Error parsing the parameters.");
+		return 1;
+	}
+
+  SAMPLES_LENGTH = LENGTH;
+  SAMPLES_LENGTH *= SAMPLERATE;
+  SAMPLES_LENGTH /= 1000;
+
+	// Get any registry (global) settings
+	{
+		HKEY hkey;
+		DWORD cbdata;
+		if ( RegOpenKey(HKEY_CURRENT_USER, LINEINPLUGINKEY, &hkey) == ERROR_SUCCESS ) {
+			cbdata=sizeof(BOOL);
+			if ( RegQueryValueEx(hkey, "ReprepareWaveHeaders", NULL, NULL, (LPBYTE)&REPREPARE, &cbdata) != ERROR_SUCCESS ) {
+				REPREPARE=FALSE;
+			}
+			RegCloseKey(hkey);
+		} else {
+			REPREPARE=FALSE;
+		}
+	}
+	
+	if ( CHECKS ) {
+		if ( !dxsoundsupport && DEVTYPE == DIRECTX_DEVICE ) {
+			Error("No DirectSound support!");
+			return 1;
+		}
+
+		if ( BITSPERSAMPLE % 8 ) {
+			if ( MessageBox(NULL, "Do you really want a bits per sample that is NOT a multiple of 8 (if you press No, I will round it up to the nearest multiple)?", "Just checking", MB_ICONWARNING | MB_YESNO) == IDNO ) {
+				BITSPERSAMPLE+=8 - (BITSPERSAMPLE % 8);
+			}
+		}
+
+		// Block align and shift
+		BLOCKALIGN_IN=NCHANNELS_IN*( (BITSPERSAMPLE/8) + (BITSPERSAMPLE % 8?1:0) );
+		BLOCKALIGN_OUT=NCHANNELS_OUT*( (BITSPERSAMPLE/8) + (BITSPERSAMPLE % 8?1:0) );
+
+		// Buffersize checks
+		if ( BUFSIZE < 576 ) {
+			if ( MessageBox(NULL, "Setting the buffersize below 576 could crash WinAMP and is not meant for normal use.\nDo you really want to set the buffer size below 576?", "Warning!", MB_ICONWARNING | MB_YESNO) == IDNO ) {
+				BUFSIZE=576;
+			}
+		}
+		if ( (BUFSIZE % BLOCKALIGN_IN) != 0 ) {
+			if ( MessageBox(NULL, "It is not advisable to set the buffersize to a value that is not a multiple of the blocksize (nch*(bps/8)).\nDo you really want to do that (if you select no, the value will be rounded down to the nearest mutliple)?", "Warning!", MB_ICONWARNING | MB_YESNO) == IDNO ) {
+				BUFSIZE-=BUFSIZE % BLOCKALIGN_IN;
+			}
+		}
+
+		if ( DEVTYPE == DIRECTX_DEVICE && NUMBUFFERS > 64 ) {
+			if ( MessageBox(NULL, "More than 64 virtual buffers could cause problems with DiretSound devices!\nDo you want to use more than 64 buffers? (if you select no, you will get 64 buffers)", "Warning!", MB_ICONWARNING | MB_YESNO) == IDNO ) {
+				NUMBUFFERS=64;
+			}
+		}
+	}
+#ifdef NEWEXPAND
+	// Expand the title
+	{
+		expandable<> ExpObj;
+		expandresults expresults;
+
+		// Assign ExpObj the unexpanded title
+		ExpObj.set_expstr(ttitle);
+
+		// Expand the title
+		CURTITLE="";
+		ExpObj.expandto(CURTITLE,options,expresults);
+	}
+#else
+	if (!expandtitle(CURTITLE, ttitle, SAMPLERATE, BITSPERSAMPLE, NCHANNELS_IN, LENGTH, STARTTIME, ISSTARTTIME, ISSTARTDATE, NUMBUFFERS, BUFSIZE, BUFFERLEN, PREBUFFERLEN, TRUE, DEVICE, MUTE, CHECKS, DEVTYPE, AVOIDSTOPPROBLEM)) {
+		Error("Error expanding the title.");
+		return 1;
+	}
+#endif
+
+	// Don't forget to clean up!
+	{
+		for(expandable<>::FVarMapType::iterator it=options.begin(); it!=options.end(); it++) {
+			delete (*it).second;
+		}
+	}
+
+    // Start setting up
+	maxlatency = mod.outMod->Open(SAMPLERATE, NCHANNELS_OUT, BITSPERSAMPLE, BUFFERLEN, PREBUFFERLEN);
+	if (maxlatency < 0) {
+		Error("Sorry, the plugin was unable\nto open the output plugin.");
+		return 1;
+	}
+	mod.SetInfo((int)((SAMPLERATE*BLOCKALIGN_OUT*8)/1000), (int)(SAMPLERATE/1000), NCHANNELS_OUT, 1);
+	mod.SAVSAInit(maxlatency,SAMPLERATE);
+//	mod.VSASetInfo(NCHANNELS, SAMPLERATE);
+	mod.VSASetInfo(SAMPLERATE, NCHANNELS_OUT);
+	mod.outMod->SetVolume(-666);
+	if ( startthreshold < 0 ) {
+		STARTTHRESHOLD = -1;
+	} else {
+		STARTTHRESHOLD = static_cast<int>(startthreshold*static_cast<float>(1<<(BITSPERSAMPLE-1)));
+	}
+	if ( pausethreshold < 0 ) {
+		PAUSETHRESHOLD = -1;
+	} else {
+		PAUSETHRESHOLD = static_cast<int>(pausethreshold*static_cast<float>(1<<(BITSPERSAMPLE-1)));
+	}
+	if ( stopthreshold < 0 ) {
+		STOPTHRESHOLD = -1;
+	} else {
+		STOPTHRESHOLD = static_cast<int>(stopthreshold*static_cast<float>(1<<(BITSPERSAMPLE-1)));
+	}
+	TRIGGER_TYPE = no_trigger;
+  // \todo Do some sanity checks here (like startthreshold > pausethreshold > stopthreshold)
+  // If startthreshold is not defined the plugin should start immediately and only stopthreshold will be minded.
+  if ( STARTTHRESHOLD == -1 ) {
+    TRIGGER_TYPE = start_trigger;
+    PAUSETHRESHOLD = -1;
+  }
+
+	switch(DEVTYPE) {
+	case WAVE_DEVICE:
+		// Set up the format
+		waveInFormat.wFormatTag=WAVE_FORMAT_PCM;
+		waveInFormat.nChannels=NCHANNELS_IN;
+		waveInFormat.nSamplesPerSec=SAMPLERATE;
+		waveInFormat.nAvgBytesPerSec=SAMPLERATE*BLOCKALIGN_IN;
+		waveInFormat.nBlockAlign=BLOCKALIGN_IN;
+		waveInFormat.wBitsPerSample=BITSPERSAMPLE;
+		waveInFormat.cbSize=0;
+
+		// Check wether format is supported
+		if ( waveInOpen(NULL, DEVICE, &waveInFormat, 0, 0, WAVE_FORMAT_QUERY) == WAVERR_BADFORMAT ) {
+			Error("Sorry, but the format you chose is not supported\nby the device you're using.\nPlease select a different format.");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			return 1;
+		}
+
+		// Open the device
+		if ( result=waveInOpen(&hwaveIn, DEVICE, &waveInFormat, (DWORD)&waveInProc, 1, CALLBACK_FUNCTION) != MMSYSERR_NOERROR ) {
+			ReportError(result, "while opening the device.");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			return 1;
+		}
+
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return 0;
+		fprintf(file, "Device opened\n");
+		fclose(file);
+#endif
+
+		// Alright, go ahead and start
+		Playing=TRUE;
+
+		waveHdr=(WAVEHDR*)GlobalAlloc(GMEM_FIXED | GMEM_SHARE | GMEM_ZEROINIT, (DWORD) NUMBUFFERS * sizeof(WAVEHDR)); 
+		if (!waveHdr) {
+			Error("Unable to allocate memory! (waveHdr)");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			waveInClose(hwaveIn);
+			return 1;
+		}
+
+		buffers=(char**)GlobalAlloc(GMEM_FIXED | GMEM_SHARE | GMEM_ZEROINIT, (DWORD) NUMBUFFERS * sizeof(char*));
+		if (!buffers) {
+			Error("Unable to allocate memory! (buffers)");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			waveInClose(hwaveIn);
+			GlobalFree(waveHdr);
+			return 1;
+		}
+
+		emptybuffer=(char*)GlobalAlloc(GMEM_FIXED | GMEM_SHARE | GMEM_ZEROINIT, (DWORD) BUFSIZE*2*sizeof(char));
+		if(!emptybuffer) {
+			Error("Unable to allocate memory! (emptybuffer)");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			waveInClose(hwaveIn);
+			GlobalFree(waveHdr);
+			GlobalFree(buffers);
+			return 1;
+		}
+
+		for(t=0; t<NUMBUFFERS; t++) {
+			buffers[t]=(char*)GlobalAlloc(GMEM_FIXED | GMEM_SHARE | GMEM_ZEROINIT, BUFSIZE*2*sizeof(char));
+			waveHdr[t].lpData=buffers[t];
+			if(!waveHdr[t].lpData) {
+				Error("Unable to allocate memory! (play4)");
+				mod.outMod->Close(); mod.SAVSADeInit();
+				waveInReset(hwaveIn);
+				t--;
+				for (;t>=0; t--) {
+					waveInUnprepareHeader(hwaveIn, &waveHdr[t], sizeof(WAVEHDR));
+					GlobalFree(waveHdr[t].lpData);
+				}
+				waveInClose(hwaveIn);
+				GlobalFree(waveHdr);
+				GlobalFree(buffers);
+				GlobalFree(emptybuffer);
+				return 1;
+			}
+			waveHdr[t].dwBufferLength=BUFSIZE;
+			waveHdr[t].dwFlags=0;
+			waveHdr[t].dwUser=t;
+
+			if (result=waveInPrepareHeader(hwaveIn, &waveHdr[t], sizeof(WAVEHDR))!=MMSYSERR_NOERROR) {
+				ReportError(result, "while preparing a header.");
+				mod.outMod->Close(); mod.SAVSADeInit();
+				waveInReset(hwaveIn);
+				GlobalFree(waveHdr[t].lpData);
+				t--;
+				for (;t>=0; t--) {
+					waveInUnprepareHeader(hwaveIn, &waveHdr[t], sizeof(WAVEHDR));
+					GlobalFree(waveHdr[t].lpData);
+				}
+				waveInClose(hwaveIn);
+				GlobalFree(waveHdr);
+				GlobalFree(buffers);
+				GlobalFree(emptybuffer);
+				return 1;
+			}
+
+			if (result=waveInAddBuffer(hwaveIn, &waveHdr[t], sizeof(WAVEHDR))!=MMSYSERR_NOERROR) {
+				ReportError(result, "while adding a buffer.");
+				mod.outMod->Close(); mod.SAVSADeInit();
+				waveInReset(hwaveIn);
+				for (;t>=0; t--) {
+					waveInUnprepareHeader(hwaveIn, &waveHdr[t], sizeof(WAVEHDR));
+					GlobalFree(waveHdr[t].lpData);
+				}
+				waveInClose(hwaveIn);
+				GlobalFree(waveHdr);
+				GlobalFree(buffers);
+				GlobalFree(emptybuffer);
+				return 1;
+			}
+		}
+
+		if ( ISSTARTTIME || (TRIGGERTIME > -1 && TRIGGER_TYPE == no_trigger) ) pause();
+
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return 0;
+		fprintf(file, "waveInStart\n");
+		fclose(file);
+#endif
+
+		if (result=waveInStart(hwaveIn)!=MMSYSERR_NOERROR) {
+			ReportError(result, "while trying to start input.");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			waveInReset(hwaveIn);
+			for (t=0;t<NUMBUFFERS; t++) {
+				waveInUnprepareHeader(hwaveIn, &waveHdr[t], sizeof(WAVEHDR));
+				GlobalFree(waveHdr[t].lpData);
+			}
+			waveInClose(hwaveIn);
+			GlobalFree(waveHdr);
+			GlobalFree(buffers);
+			GlobalFree(emptybuffer);
+			return 1;
+		}
+		break;
+
+	case DIRECTX_DEVICE:
+		// Get the DirectSoundCapture interface
+		if ( (hresult=DxSndCapCreate((LPGUID)DEVICE, &lpDxSndCap, NULL)) != DS_OK ) {
+			ReportError(hresult, "while trying to create the directsound capture interface.");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			return 1;
+		}
+
+		// Set up the format
+		dxwaveFormat.wFormatTag=WAVE_FORMAT_PCM;
+		dxwaveFormat.nChannels=NCHANNELS_IN;
+		dxwaveFormat.nSamplesPerSec=SAMPLERATE;
+		dxwaveFormat.nAvgBytesPerSec=SAMPLERATE*BLOCKALIGN_IN;
+		dxwaveFormat.nBlockAlign=BLOCKALIGN_IN;
+		dxwaveFormat.wBitsPerSample=BITSPERSAMPLE;
+		dxwaveFormat.cbSize=0;
+
+		// Set up buffer description
+		bufDesc.dwSize=sizeof(bufDesc);
+		bufDesc.dwFlags=NULL;
+		bufDesc.dwBufferBytes=BUFSIZE*NUMBUFFERS;
+		bufDesc.dwReserved=0;
+		bufDesc.lpwfxFormat=&dxwaveFormat;
+
+		// Get the DirectSoundCaptureBuffer interface
+		if ( (hresult=lpDxSndCap->CreateCaptureBuffer(&bufDesc, &lpDxSndCapBuf, NULL)) != DS_OK ) {
+			ReportError(hresult, "while trying to create the directsound capture buffer interface.");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			lpDxSndCap->Release();
+			return 1;
+		}
+
+		// Get the notification interface
+		if ( (hresult=lpDxSndCapBuf->QueryInterface(IID_IDirectSoundNotify, (void**)&lpDxSndCapNotify)) != S_OK ) {
+			ReportError(hresult, "while trying to get the directsound capture buffer notification interface.");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			lpDxSndCapBuf->Release();
+			lpDxSndCap->Release();
+			return 1;
+		}
+
+		// Setup the events/notifications
+		dxevents=(HANDLE*)malloc(sizeof(HANDLE)*NUMBUFFERS);
+		dxposnot=(DSBPOSITIONNOTIFY*)malloc(sizeof(DSBPOSITIONNOTIFY)*NUMBUFFERS);
+		if ( !dxevents || !dxposnot ) {
+			Error("Error allocating memory!");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			lpDxSndCapNotify->Release();
+			lpDxSndCapBuf->Release();
+			lpDxSndCap->Release();
+			return 1;
+		}
+
+		for(t=0; t<NUMBUFFERS; t++) {
+			dxevents[t] = CreateEvent(NULL, TRUE, FALSE, NULL);
+			if ( !dxevents[t] ) {
+				Error("Error creating event!");
+				mod.outMod->Close(); mod.SAVSADeInit();
+				lpDxSndCapNotify->Release();
+				lpDxSndCapBuf->Release();
+				lpDxSndCap->Release();
+				FREE(dxevents);
+				FREE(dxposnot);
+				return 1;
+			}
+			dxposnot[t].dwOffset=(BUFSIZE*(t+1))-1;
+			dxposnot[t].hEventNotify=dxevents[t];
+		}
+
+		if ( (hresult=lpDxSndCapNotify->SetNotificationPositions(NUMBUFFERS, dxposnot)) != DS_OK ) {
+			ReportError(hresult, "while trying to set notifications.");
+			mod.outMod->Close(); mod.SAVSADeInit();
+			lpDxSndCapNotify->Release();
+			lpDxSndCapBuf->Release();
+			lpDxSndCap->Release();
+			for(t=0; t<NUMBUFFERS; t++) CloseHandle(dxevents[t]);
+			FREE(dxevents);
+			FREE(dxposnot);
+			return 1;
+		}
+
+		// Create capture thread
+		killdxthread=false;
+		dxsndthread=CreateThread(NULL,0,(LPTHREAD_START_ROUTINE) DxSndCapThread, NULL, 0, &tmp);
+		SetThreadPriority(dxsndthread, THREAD_PRIORITY_HIGHEST);
+
+		// Start
+		Playing=TRUE;
+		if ( ISSTARTTIME || (TRIGGERTIME > -1 && TRIGGER_TYPE == no_trigger) ) pause();
+		lpDxSndCapBuf->Start(DSCBSTART_LOOPING);
+	}
+
+  if ( ISSTARTTIME ) {
+    hPauseTillStartThread = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE) PauseTillStart, (void *) &par, 0, &tmp);
+  }
+  else {
+    hPauseTillStartThread = 0;
+  }
+  if ( !TITLEFILE.empty() ) {
+    hUpdateTitleThread = CreateThread(NULL, 0, UpdateTitleThread, (void*)&killUpdateTitleThread, 0, &tmp);
+  }
+  else {
+    hUpdateTitleThread = 0;
+  }
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return 0;
+	fprintf(file, "Play End\n");
+	fclose(file);
+#endif
+	
+	return 0; 
+}
+
+void stop() { 
+	int t;
+
+#ifdef LOGGING
+	FILE * file;
+#endif
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "Stop start\n");
+	fclose(file);
+#endif
+
+	if(!Playing) return;
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "Playing=FALSE\n");
+	fclose(file);
+#endif
+
+	Playing=FALSE;
+  killUpdateTitleThread = true;
+  if ( hPauseTillStartThread ) {
+    TerminateThread(hPauseTillStartThread, 0); /* It doesn't allocate anything so it should be reasonably safe. */
+    hPauseTillStartThread = 0;
+  }
+
+	switch(DEVTYPE) {
+	case WAVE_DEVICE:
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return;
+		fprintf(file, "waveInReset\n");
+		fclose(file);
+#endif
+
+		waveInReset(hwaveIn);
+
+		for(t=0; t<NUMBUFFERS; t++) {
+			if ( !AVOIDSTOPPROBLEM ) {
+#ifdef LOGGING
+				file=fopen("lineinplugin.log", "a+");
+				if ( file == NULL ) return;
+				fprintf(file, "waveInUnprepareHeader (Playing==FALSE)\n");
+				fclose(file);
+#endif
+
+				waveInUnprepareHeader(hwaveIn, &waveHdr[t], sizeof(WAVEHDR));
+			}
+
+#ifdef LOGGING
+			file=fopen("lineinplugin.log", "a+");
+			if ( file == NULL ) return;
+			fprintf(file, "FREE(wvhdr->lpData)\n");
+			fclose(file);
+#endif
+
+			GlobalFree(waveHdr[t].lpData);
+		}
+
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return;
+		fprintf(file, "waveInClose\n");
+		fclose(file);
+#endif
+			
+		waveInClose(hwaveIn);
+
+		GlobalFree(waveHdr);
+		GlobalFree(buffers);
+		GlobalFree(emptybuffer);
+		break;
+
+	case DIRECTX_DEVICE:
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return;
+		fprintf(file, "DxEnd\n");
+		fclose(file);
+#endif
+
+		killdxthread=true;
+		Sleep(50);
+
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return;
+		fprintf(file, "Sleeped(50)\n");
+		fclose(file);
+#endif
+
+		lpDxSndCapBuf->Stop();
+		lpDxSndCapNotify->Release();
+		lpDxSndCapBuf->Release();
+		lpDxSndCap->Release();
+
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return;
+		fprintf(file, "Released a lot\n");
+		fclose(file);
+#endif
+
+		for(t=0; t<NUMBUFFERS; t++) CloseHandle(dxevents[t]);
+
+#ifdef LOGGING
+		file=fopen("lineinplugin.log", "a+");
+		if ( file == NULL ) return;
+		fprintf(file, "Closed handles\n");
+		fclose(file);
+#endif
+
+		FREE(dxevents);
+		FREE(dxposnot);
+		FREE(DEVICE);
+		break;
+	}
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "mod.outMode->Close\n");
+	fclose(file);
+#endif
+
+	mod.outMod->Close();
+	mod.SAVSADeInit();
+
+  { // Kill update title thread (the killswitch has already been set)
+    if ( hUpdateTitleThread && WaitForSingleObject(hUpdateTitleThread, 300) != WAIT_OBJECT_0 ) {
+      TerminateThread(hUpdateTitleThread, 0);
+    }
+  }
+
+  if ( CHNMAP_BUFFER ) {
+    free(CHNMAP_BUFFER);
+    CHNMAP_BUFFER = 0;
+    CHNMAP_BUFFER_SIZE = 0;
+  }
+
+	Stopping=FALSE;
+
+#ifdef LOGGING
+	file=fopen("lineinplugin.log", "a+");
+	if ( file == NULL ) return;
+	fprintf(file, "Stopped\n");
+	fclose(file);
+#endif
+}
+
+int getlength() { return LENGTH; }
+int getoutputtime() { return mod.outMod->GetOutputTime(); }
+void setoutputtime(int time_in_ms) {  }
+
+void setvolume(int volume) { mod.outMod->SetVolume(volume); }
+void setpan(int pan) { mod.outMod->SetPan(pan); }
+
+int infoDlg(char *fn, HWND hwnd)
+{
+	return 0;
+}
+
+void getfileinfo(char *filename, char *title, int *length_in_ms)
+{
+	if (!filename || !*filename)  // currently playing file
+	{
+		if (length_in_ms) *length_in_ms=getlength();
+		if (title) {
+      if ( TITLEFILE.empty() ) {
+			  strcpy(title, CURTITLE.c_str());
+      }
+      else {
+        FILE* file = fopen(TITLEFILE.c_str(), "r");
+        if ( !file ) {
+  			  strcpy(title, CURTITLE.c_str());
+        }
+        else {
+          char buffer[2048];
+          strncpy(title, CURTITLE.c_str(), 2047);
+          title[2047] = 0;
+          while(fgets(buffer, 2048, file)) {
+            size_t len = strlen(buffer);
+            while(len>0 && (buffer[len-1] == 10 || buffer[len-1] == 13)) {
+              len--;
+              buffer[len] = 0;
+            }
+            if (len>0) {
+              memcpy(title, buffer, len+1);
+            }
+          }
+          fclose(file);
+        }
+      }
+			if ( SHOWFORMAT ) {
+				char sratebuf[10];
+				char bpsbuf[10];
+				char numbufsbuf[10];
+				char bufsizebuf[10];
+	
+				_ultoa(SAMPLERATE, sratebuf, 10);
+				_ultoa(BITSPERSAMPLE, bpsbuf, 10);
+				_ltoa(NUMBUFFERS, numbufsbuf, 10);
+				_ltoa(BUFSIZE, bufsizebuf, 10);
+				strcat(title, " (");
+				strcat(title, sratebuf);
+				strcat(title, "Hz ");
+				strcat(title, bpsbuf);
+				strcat(title, "bps ");
+				if ( NCHANNELS_IN < 3 ) {
+					strcat(title, ((NCHANNELS_IN==1)?"Mono, buffers: ":"Stereo, buffers: ") );
+				} else {
+					_ultoa(NCHANNELS_IN, title+strlen(title), 10);
+					strcat(title, " channels, buffers: ");
+				}
+				strcat(title, numbufsbuf);
+				strcat(title, "x");
+				strcat(title, bufsizebuf);
+				strcat(title, " bytes)");
+			}
+		}
+	}
+	else // some other file
+	{
+		unsigned long srate, device;
+		unsigned short bps, nch, nch_out;
+		long leninms;
+		long numbufs, bufsize;
+		int bufferlen, prebufferlen, devtype;
+		string ttitle;
+    string titlefile;
+		string disptitle;
+		bool mute, showformat, isstarttime, isstartdate, checks, avoidstopproblem=false;
+		SYSTEMTIME starttime;
+		size_t chnmap[128];
+		float startthreshold, stopthreshold, pausethreshold;
+		long triggertime;
+		OptionType options;
+		
+		if (!parseparameters(options, filename/*, 0*/, &srate, &bps, &nch, &leninms, &starttime, &isstarttime, &isstartdate, &numbufs, &bufsize, &bufferlen, &prebufferlen, ttitle, titlefile, &showformat, FALSE, &device, &mute, &checks, &devtype, chnmap, &nch_out, &triggertime, &startthreshold, &stopthreshold, &pausethreshold)) {
+			Error("Error parsing the parameters.");
+			return;
+		}
+
+#ifdef NEWEXPAND
+		// Expand the title
+		{
+			expandable<> ExpObj;
+			expandresults expresults;
+
+			// Assign ExpObj the unexpanded title
+			ExpObj.set_expstr(ttitle);
+
+			// Expand the title
+			ExpObj.expandto(disptitle,options,expresults);
+		}
+#else
+		if (!expandtitle(disptitle, string(ttitle), srate, bps, nch, leninms, starttime, isstarttime, isstartdate, numbufs, bufsize, bufferlen, prebufferlen, FALSE, device, mute, checks, devtype, avoidstopproblem)) {
+			Error("Error expanding the title.");
+			return;
+		}
+#endif
+
+		// Don't forget to clean up!
+		{
+			for(expandable<>::FVarMapType::iterator it=options.begin(); it!=options.end(); it++) {
+				delete (*it).second;
+			}
+		}
+
+		if (length_in_ms) {
+			*length_in_ms=leninms;
+		}
+		if (title) {
+
+			strcpy(title, disptitle.c_str());
+			if ( showformat ) {
+				char sratebuf[10];
+				char bpsbuf[10];
+				char numbufsbuf[10];
+				char bufsizebuf[10];
+
+				_ultoa(srate, sratebuf, 10);
+				_ultoa(bps, bpsbuf, 10);
+				_ltoa(numbufs, numbufsbuf, 10);
+				_ltoa(bufsize, bufsizebuf, 10);
+
+				strcat(title, " (");
+				strcat(title, sratebuf);
+				strcat(title, "Hz ");
+				strcat(title, bpsbuf);
+				strcat(title, "bps ");
+				if ( nch < 3 ) {
+					strcat(title, ((nch==1)?"Mono, buffers: ":"Stereo, buffers: ") );
+				} else {
+					_ultoa(nch, title+strlen(title), 10);
+					strcat(title, " channels, buffers: ");
+				}
+				strcat(title, numbufsbuf);
+				strcat(title, "x");
+				strcat(title, bufsizebuf);
+				strcat(title, " bytes)");
+			}
+		}
+	}
+}
+
+void process_triggers(const char* const data, const int size, const size_t blockalign)
+{
+	if ( TRIGGERTIME > -1 && size > 0 )
+	{
+		__int64 sum=0;
+		switch(BITSPERSAMPLE)
+		{
+		case 8:
+			{
+				const unsigned char * d=reinterpret_cast<const unsigned char *>(data);
+				const unsigned char * const end=reinterpret_cast<const unsigned char *>(data+size);
+				for(; d < end; ++d) sum+=abs(static_cast<int>(*d)-128)+128;
+			}
+			break;
+		case 16:
+			{
+				const __int16 * d=reinterpret_cast<const __int16 *>(data);
+				const __int16 * const end=reinterpret_cast<const __int16 *>(data+size);
+				for(; d < end; ++d) sum+=abs(*d);
+			}
+			break;
+		case 24:
+			{
+				const unsigned char * d=reinterpret_cast<const unsigned char *>(data);
+				const unsigned char * const end=reinterpret_cast<const unsigned char *>(data+size);
+				for(; d < end; ++d)
+				{
+					__int32 e;
+					unsigned char * f=reinterpret_cast<unsigned char*>(&e);
+					*f = *d;
+					*(++f) = *(++d);
+					*(++f) = *(++d);
+					*(++f) = ((*d & 0x80) ? 0xff : 0x00);
+					sum+=abs(e);
+				}
+			}
+			break;
+		case 32:
+			{
+				const __int32 * d=reinterpret_cast<const __int32 *>(data);
+				const __int32 * const end=reinterpret_cast<const __int32 *>(data+size);
+				for(; d < end; ++d) sum+=abs(*d);
+			}
+			break;
+		default:
+			Error("This number of bits per sample is not supported with triggers!");
+			stopme();
+			return;
+		} // switch(BITSPERSAMPLE)
+		const int numsamples = size/blockalign;
+    switch(TRIGGER_TYPE) {
+    case no_trigger:
+      if ( sum >= numsamples*STARTTHRESHOLD ) {
+				TRIGGER_TYPE = start_trigger;
+			}
+      break;
+    case start_trigger:
+      if ( sum < numsamples*STOPTHRESHOLD ) {
+				TRIGGER_TYPE = stop_trigger;
+			}
+      else if ( sum < numsamples*PAUSETHRESHOLD ) {
+				TRIGGER_TYPE = pause_trigger;
+			}
+      break;
+    case pause_trigger:
+      if ( sum >= numsamples*STARTTHRESHOLD ) {
+				TRIGGER_TYPE = start_trigger;
+			}
+      else if ( sum < numsamples*STOPTHRESHOLD ) {
+				TRIGGER_TYPE = stop_trigger;
+			}
+      break;
+    }
+	}
+}
+
+#ifdef WINAMP
+void eq_set(int on, char data[10], int preamp) { }
+
+// Includes of dialogs, etc.
+#include "configdlg.h"
+
+In_Module mod = 
+{
+	IN_VER,
+	PLUGINNAME
+#ifdef __alpha
+	"(AXP)"
+#else
+	"(x86)"
+#endif
+	,
+	0,	// hMainWindow
+	0,  // hDllInstance
+	"\0"
+	,
+	0,	// is_seekable
+	1,  // uses output
+	config,
+	about,
+	init,
+	quit,
+	getfileinfo,
+	infoDlg,
+	isourfile,
+	play,
+	pause,
+	unpause,
+	ispaused,
+	stop,
+	
+	getlength,
+	getoutputtime,
+	setoutputtime,
+
+	setvolume,
+	setpan,
+
+	0,0,0,0,0,0,0,0,0, // vis stuff
+
+
+	0,0, // dsp
+
+	eq_set,
+
+	NULL,		// setinfo
+
+	0 // out_mod
+
+};
+
+__declspec( dllexport ) In_Module * winampGetInModule2()
+{
+	INITCOMMONCONTROLSEX initcc;
+
+	initcc.dwSize=sizeof(INITCOMMONCONTROLSEX);
+	initcc.dwICC=ICC_LISTVIEW_CLASSES;
+
+	if ( !InitCommonControlsEx(&initcc) ) {
+		Error("Error loading common controls.");
+		return NULL;
+	}
+
+	return &mod;
+}
+#endif // WINAMP
